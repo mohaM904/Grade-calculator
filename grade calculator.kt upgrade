@@ -1,0 +1,546 @@
+import org.apache.poi.ss.usermodel.CellType
+import org.apache.poi.xssf.usermodel.XSSFWorkbook
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
+import org.apache.pdfbox.pdmodel.common.PDRectangle
+import org.apache.pdfbox.pdmodel.font.PDType1Font
+import java.awt.BorderLayout
+import java.awt.Color
+import java.awt.Dimension
+import java.awt.FlowLayout
+import java.awt.Font
+import java.awt.GridLayout
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import javax.swing.BorderFactory
+import javax.swing.Box
+import javax.swing.BoxLayout
+import javax.swing.JButton
+import javax.swing.JFileChooser
+import javax.swing.JFrame
+import javax.swing.JLabel
+import javax.swing.JOptionPane
+import javax.swing.JPanel
+import javax.swing.JScrollPane
+import javax.swing.JTable
+import javax.swing.SwingUtilities
+import javax.swing.UIManager
+import javax.swing.filechooser.FileNameExtensionFilter
+import javax.swing.table.DefaultTableModel
+
+private const val PASS_MARK = 50.0
+
+data class Student(
+    val name: String,
+    val marks: Double
+) {
+    val status: String
+        get() = if (marks >= PASS_MARK) "Pass" else "Fail"
+
+    val grade: String
+        get() = when {
+            marks in 90.0..100.0 -> "A"
+            marks in 80.0..<90.0 -> "B"
+            marks in 70.0..<80.0 -> "C"
+            marks in 60.0..<70.0 -> "D"
+            marks in 50.0..<60.0 -> "E"
+            marks in 0.0..<50.0 -> "F"
+            else -> "Invalid"
+        }
+}
+
+fun validateStudentMarks(student: Student): Boolean {
+    return student.marks in 0.0..100.0 && student.name.isNotBlank()
+}
+
+fun loadStudentsFromExcel(inputFile: File): List<Student> {
+    if (!inputFile.exists()) {
+        error("Input file not found: ${inputFile.absolutePath}")
+    }
+
+    return FileInputStream(inputFile).use { fis ->
+        XSSFWorkbook(fis).use { workbook ->
+            val sheet = workbook.getSheetAt(0)
+            val students = mutableListOf<Student>()
+
+            for (i in 1..sheet.lastRowNum) {
+                val row = sheet.getRow(i) ?: continue
+                val nameCell = row.getCell(0)
+                val marksCell = row.getCell(1)
+
+                val name = when {
+                    nameCell == null -> ""
+                    nameCell.cellType == CellType.STRING -> nameCell.stringCellValue
+                    nameCell.cellType == CellType.NUMERIC -> nameCell.numericCellValue.toString()
+                    else -> ""
+                }
+
+                val marks = when {
+                    marksCell == null -> 0.0
+                    marksCell.cellType == CellType.NUMERIC -> marksCell.numericCellValue
+                    marksCell.cellType == CellType.STRING -> marksCell.stringCellValue.toDoubleOrNull() ?: 0.0
+                    else -> 0.0
+                }
+
+                students.add(Student(name.trim(), marks))
+            }
+
+            students
+        }
+    }
+}
+
+fun writeStudentsToExcel(students: List<Student>, outputFile: File) {
+    XSSFWorkbook().use { outWorkbook ->
+        val outSheet = outWorkbook.createSheet("PassStatus")
+
+        val outHeader = outSheet.createRow(0)
+        outHeader.createCell(0).setCellValue("Student")
+        outHeader.createCell(1).setCellValue("Marks")
+        outHeader.createCell(2).setCellValue("Grade")
+        outHeader.createCell(3).setCellValue("Status")
+
+        var outRowNum = 1
+        students
+            .filter { validateStudentMarks(it) }
+            .forEach { student ->
+                val outRow = outSheet.createRow(outRowNum++)
+                outRow.createCell(0).setCellValue(student.name)
+                outRow.createCell(1).setCellValue(student.marks)
+                outRow.createCell(2).setCellValue(student.grade)
+                outRow.createCell(3).setCellValue(student.status)
+            }
+
+        FileOutputStream(outputFile).use { fos ->
+            outWorkbook.write(fos)
+        }
+    }
+}
+
+fun writeStudentsToPdf(students: List<Student>, outputFile: File) {
+    PDDocument().use { document ->
+        var page = PDPage(PDRectangle.LETTER)
+        document.addPage(page)
+        var content = PDPageContentStream(document, page)
+
+        val margin = 40f
+        val leading = 16f
+        val startY = page.mediaBox.height - margin
+        var y = startY
+
+        fun startTextAtCurrentLine() {
+            content.beginText()
+            content.setFont(PDType1Font.HELVETICA, 12f)
+            content.newLineAtOffset(margin, y)
+        }
+
+        fun endLine() {
+            content.endText()
+            y -= leading
+        }
+
+        fun newPage() {
+            content.close()
+            page = PDPage(PDRectangle.LETTER)
+            document.addPage(page)
+            content = PDPageContentStream(document, page)
+            y = startY
+        }
+
+        startTextAtCurrentLine()
+        content.setFont(PDType1Font.HELVETICA_BOLD, 14f)
+        content.showText("Student Results")
+        endLine()
+
+        startTextAtCurrentLine()
+        content.setFont(PDType1Font.HELVETICA_BOLD, 12f)
+        content.showText("Student | Marks | Grade | Status")
+        endLine()
+
+        students
+            .filter { validateStudentMarks(it) }
+            .forEach { student ->
+                if (y < margin) {
+                    newPage()
+                    startTextAtCurrentLine()
+                    content.setFont(PDType1Font.HELVETICA_BOLD, 12f)
+                    content.showText("Student | Marks | Grade | Status")
+                    endLine()
+                }
+
+                val line = "${student.name} | ${String.format("%.2f", student.marks)} | ${student.grade} | ${student.status}"
+                startTextAtCurrentLine()
+                content.setFont(PDType1Font.HELVETICA, 12f)
+                content.showText(line.take(100))
+                endLine()
+            }
+
+        content.close()
+        document.save(outputFile)
+    }
+}
+
+fun buildTableModel(students: List<Student>): DefaultTableModel {
+    val model = object : DefaultTableModel(arrayOf("Student", "Marks", "Grade", "Status", "Valid"), 0) {
+        override fun isCellEditable(row: Int, column: Int): Boolean = false
+    }
+
+    students.forEach { student ->
+        model.addRow(
+            arrayOf(
+                student.name,
+                String.format("%.2f", student.marks),
+                student.grade,
+                student.status,
+                if (validateStudentMarks(student)) "Yes" else "No"
+            )
+        )
+    }
+
+    return model
+}
+
+fun createMetricCard(title: String, accent: Color): Pair<JPanel, JLabel> {
+    val titleLabel = JLabel(title).apply {
+        foreground = Color(96, 103, 122)
+        font = Font(Font.SANS_SERIF, Font.PLAIN, 13)
+    }
+
+    val valueLabel = JLabel("0").apply {
+        foreground = Color(28, 31, 45)
+        font = Font(Font.SANS_SERIF, Font.BOLD, 26)
+    }
+
+    val accentBar = JPanel().apply {
+        background = accent
+        preferredSize = Dimension(10, 0)
+    }
+
+    val textPanel = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        background = Color.WHITE
+        add(titleLabel)
+        add(Box.createVerticalStrut(8))
+        add(valueLabel)
+        border = BorderFactory.createEmptyBorder(14, 14, 14, 14)
+    }
+
+    val card = JPanel(BorderLayout()).apply {
+        background = Color.WHITE
+        border = BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(Color(224, 228, 236)),
+            BorderFactory.createEmptyBorder(0, 0, 0, 0)
+        )
+        add(accentBar, BorderLayout.WEST)
+        add(textPanel, BorderLayout.CENTER)
+    }
+
+    return card to valueLabel
+}
+
+fun stylePrimaryButton(button: JButton, background: Color, foreground: Color) {
+    button.background = background
+    button.foreground = foreground
+    button.font = Font(Font.SANS_SERIF, Font.BOLD, 13)
+    button.isFocusPainted = false
+    button.border = BorderFactory.createEmptyBorder(10, 16, 10, 16)
+}
+
+fun createAndShowUi() {
+    try {
+        UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName())
+    } catch (_: Exception) {
+    }
+
+    val frame = JFrame("Class Grade Dashboard")
+    val root = JPanel(BorderLayout(0, 18)).apply {
+        background = Color(245, 247, 251)
+        border = BorderFactory.createEmptyBorder(18, 18, 18, 18)
+    }
+
+    val titleLabel = JLabel("Class Grade Dashboard").apply {
+        font = Font(Font.SANS_SERIF, Font.BOLD, 28)
+        foreground = Color(21, 26, 43)
+    }
+
+    val subtitleLabel = JLabel("Load a student marks sheet, review the results, then export to Excel or PDF.").apply {
+        font = Font(Font.SANS_SERIF, Font.PLAIN, 14)
+        foreground = Color(88, 94, 114)
+    }
+
+    val selectedFileLabel = JLabel("Selected file: none").apply {
+        font = Font(Font.SANS_SERIF, Font.PLAIN, 13)
+        foreground = Color(66, 73, 92)
+    }
+
+    val outputFileLabel = JLabel("Output files: not created yet").apply {
+        font = Font(Font.SANS_SERIF, Font.PLAIN, 13)
+        foreground = Color(66, 73, 92)
+    }
+
+    val chooseButton = JButton("Choose Excel File")
+    val sampleButton = JButton("Load Default File")
+    val exportExcelButton = JButton("Export Excel")
+    val exportPdfButton = JButton("Export PDF")
+    stylePrimaryButton(chooseButton, Color(21, 115, 71), Color(30, 43, 66))
+    stylePrimaryButton(sampleButton, Color(230, 236, 245), Color(30, 43, 66))
+    stylePrimaryButton(exportExcelButton, Color(38, 132, 255), Color(30, 43, 66))
+    stylePrimaryButton(exportPdfButton, Color(217, 48, 37), Color(30, 43, 66))
+    exportExcelButton.isEnabled = false
+    exportPdfButton.isEnabled = false
+
+    val headerPanel = JPanel(BorderLayout(0, 14)).apply {
+        background = Color.WHITE
+        border = BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(Color(224, 228, 236)),
+            BorderFactory.createEmptyBorder(20, 20, 20, 20)
+        )
+    }
+
+    val headingBlock = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        background = Color.WHITE
+        add(titleLabel)
+        add(Box.createVerticalStrut(6))
+        add(subtitleLabel)
+        add(Box.createVerticalStrut(12))
+        add(selectedFileLabel)
+        add(Box.createVerticalStrut(4))
+        add(outputFileLabel)
+    }
+
+    val actionsPanel = JPanel(FlowLayout(FlowLayout.LEFT, 10, 0)).apply {
+        background = Color.WHITE
+        add(chooseButton)
+        add(sampleButton)
+        add(exportExcelButton)
+        add(exportPdfButton)
+    }
+
+    headerPanel.add(headingBlock, BorderLayout.CENTER)
+    headerPanel.add(actionsPanel, BorderLayout.SOUTH)
+
+    val (totalCard, totalValueLabel) = createMetricCard("Total Students", Color(38, 132, 255))
+    val (validCard, validValueLabel) = createMetricCard("Valid Records", Color(21, 115, 71))
+    val (passCard, passValueLabel) = createMetricCard("Students Passed", Color(0, 153, 129))
+    val (failCard, failValueLabel) = createMetricCard("Students Failed", Color(217, 48, 37))
+
+    val summaryPanel = JPanel(GridLayout(1, 4, 12, 0)).apply {
+        background = Color(245, 247, 251)
+        add(totalCard)
+        add(validCard)
+        add(passCard)
+        add(failCard)
+    }
+
+    val table = JTable(buildTableModel(emptyList())).apply {
+        rowHeight = 28
+        font = Font(Font.SANS_SERIF, Font.PLAIN, 13)
+        gridColor = Color(232, 236, 242)
+        setShowGrid(true)
+        fillsViewportHeight = true
+        tableHeader.reorderingAllowed = false
+        tableHeader.font = Font(Font.SANS_SERIF, Font.BOLD, 13)
+        tableHeader.background = Color(236, 241, 248)
+        tableHeader.foreground = Color(32, 40, 61)
+        autoCreateRowSorter = true
+    }
+
+    val tablePanel = JPanel(BorderLayout(0, 10)).apply {
+        background = Color.WHITE
+        border = BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(Color(224, 228, 236)),
+            BorderFactory.createEmptyBorder(16, 16, 16, 16)
+        )
+    }
+
+    val tableTitleLabel = JLabel("Student Results").apply {
+        font = Font(Font.SANS_SERIF, Font.BOLD, 18)
+        foreground = Color(24, 31, 49)
+    }
+
+    val tableHintLabel = JLabel("You can sort by clicking a column header.").apply {
+        font = Font(Font.SANS_SERIF, Font.PLAIN, 12)
+        foreground = Color(96, 103, 122)
+    }
+
+    val tableHeaderPanel = JPanel(BorderLayout()).apply {
+        background = Color.WHITE
+        add(tableTitleLabel, BorderLayout.NORTH)
+        add(tableHintLabel, BorderLayout.SOUTH)
+    }
+
+    tablePanel.add(tableHeaderPanel, BorderLayout.NORTH)
+    tablePanel.add(JScrollPane(table), BorderLayout.CENTER)
+
+    val statusLabel = JLabel("Ready. Choose an Excel file to begin.").apply {
+        font = Font(Font.SANS_SERIF, Font.PLAIN, 13)
+        foreground = Color(66, 73, 92)
+        border = BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(Color(224, 228, 236)),
+            BorderFactory.createEmptyBorder(12, 14, 12, 14)
+        )
+        isOpaque = true
+        background = Color.WHITE
+    }
+
+    fun clearSummary() {
+        totalValueLabel.text = "0"
+        validValueLabel.text = "0"
+        passValueLabel.text = "0"
+        failValueLabel.text = "0"
+    }
+
+    fun updateSummary(students: List<Student>) {
+        val validStudents = students.filter(::validateStudentMarks)
+        totalValueLabel.text = students.size.toString()
+        validValueLabel.text = validStudents.size.toString()
+        passValueLabel.text = validStudents.count { it.status == "Pass" }.toString()
+        failValueLabel.text = validStudents.count { it.status == "Fail" }.toString()
+    }
+
+    var loadedStudents: List<Student> = emptyList()
+    var loadedInputFile: File? = null
+    var outputExcelFile: File? = null
+    var outputPdfFile: File? = null
+
+    fun refreshOutputLabel() {
+        val excelOutputText = outputExcelFile?.absolutePath ?: "not created"
+        val pdfOutputText = outputPdfFile?.absolutePath ?: "not created"
+        outputFileLabel.text = "Output files: Excel=$excelOutputText | PDF=$pdfOutputText"
+    }
+
+    fun processFile(inputFile: File) {
+        try {
+            val students = loadStudentsFromExcel(inputFile)
+            loadedStudents = students
+            loadedInputFile = inputFile
+            outputExcelFile = null
+            outputPdfFile = null
+
+            table.model = buildTableModel(students)
+            table.autoCreateRowSorter = true
+            updateSummary(students)
+            exportExcelButton.isEnabled = true
+            exportPdfButton.isEnabled = true
+
+            selectedFileLabel.text = "Selected file: ${inputFile.absolutePath}"
+            refreshOutputLabel()
+            statusLabel.text =
+                "Loaded ${students.size} student records successfully. Click Export Excel or Export PDF."
+
+            if (students.isEmpty()) {
+                JOptionPane.showMessageDialog(
+                    frame,
+                    "The file was opened, but no student rows were found after the header row.",
+                    "No Student Records",
+                    JOptionPane.INFORMATION_MESSAGE
+                )
+            }
+        } catch (ex: Exception) {
+            loadedStudents = emptyList()
+            loadedInputFile = null
+            outputExcelFile = null
+            outputPdfFile = null
+            clearSummary()
+            table.model = buildTableModel(emptyList())
+            exportExcelButton.isEnabled = false
+            exportPdfButton.isEnabled = false
+            selectedFileLabel.text = "Selected file: ${inputFile.absolutePath}"
+            refreshOutputLabel()
+            statusLabel.text = "Could not process the selected file."
+            JOptionPane.showMessageDialog(
+                frame,
+                ex.message ?: "Unknown error while processing the Excel file.",
+                "Processing Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+        }
+    }
+
+    chooseButton.addActionListener {
+        val fileChooser = JFileChooser().apply {
+            dialogTitle = "Select Student Marks Excel File"
+            fileFilter = FileNameExtensionFilter("Excel Files", "xlsx")
+        }
+
+        if (fileChooser.showOpenDialog(frame) == JFileChooser.APPROVE_OPTION) {
+            processFile(fileChooser.selectedFile)
+        }
+    }
+
+    sampleButton.addActionListener {
+        processFile(File("student_marks_15.xlsx"))
+    }
+
+    exportExcelButton.addActionListener {
+        val inputFile = loadedInputFile
+        if (inputFile == null) {
+            statusLabel.text = "Load a file before exporting."
+            return@addActionListener
+        }
+
+        try {
+            val resultFile = File(inputFile.parentFile ?: File("."), "student_pass_status.xlsx")
+            writeStudentsToExcel(loadedStudents, resultFile)
+            outputExcelFile = resultFile
+            refreshOutputLabel()
+            statusLabel.text = "Excel export created successfully."
+        } catch (ex: Exception) {
+            statusLabel.text = "Excel export failed."
+            JOptionPane.showMessageDialog(
+                frame,
+                ex.message ?: "Unknown error while exporting the Excel file.",
+                "Excel Export Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+        }
+    }
+
+    exportPdfButton.addActionListener {
+        val inputFile = loadedInputFile
+        if (inputFile == null) {
+            statusLabel.text = "Load a file before exporting."
+            return@addActionListener
+        }
+
+        try {
+            val resultFile = File(inputFile.parentFile ?: File("."), "student_pass_status.pdf")
+            writeStudentsToPdf(loadedStudents, resultFile)
+            outputPdfFile = resultFile
+            refreshOutputLabel()
+            statusLabel.text = "PDF export created successfully."
+        } catch (ex: Exception) {
+            statusLabel.text = "PDF export failed."
+            JOptionPane.showMessageDialog(
+                frame,
+                ex.message ?: "Unknown error while exporting the PDF file.",
+                "PDF Export Error",
+                JOptionPane.ERROR_MESSAGE
+            )
+        }
+    }
+
+    val centerPanel = JPanel(BorderLayout(0, 18)).apply {
+        background = Color(245, 247, 251)
+        add(summaryPanel, BorderLayout.NORTH)
+        add(tablePanel, BorderLayout.CENTER)
+    }
+
+    root.add(headerPanel, BorderLayout.NORTH)
+    root.add(centerPanel, BorderLayout.CENTER)
+    root.add(statusLabel, BorderLayout.SOUTH)
+
+    frame.contentPane = root
+    frame.minimumSize = Dimension(980, 620)
+    frame.setSize(1080, 680)
+    frame.setLocationRelativeTo(null)
+    frame.defaultCloseOperation = JFrame.EXIT_ON_CLOSE
+    frame.isVisible = true
+}
+
+fun main() {
+    SwingUtilities.invokeLater(::createAndShowUi)
+}
